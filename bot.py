@@ -1,66 +1,99 @@
 import os
 import asyncio
-from telethon import TelegramClient, events
-from telethon.tl.types import Channel, Chat, User
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configuration - Use Environment Variables for Security
-API_ID = os.getenv("TG_API_ID")
-API_HASH = os.getenv("TG_API_HASH")
+# We will store messages in the server's memory temporarily.
+# Note: If Render restarts the server, this memory clears. 
+chat_logs = {}
 
-# Check if we are on Render (which uses /var/data) or local
-if os.path.exists("/var/data"):
-    SESSION_PATH = "/var/data/downloader_session"
-    CHATS_DIR = "/var/data/chats"
-else:
-    SESSION_PATH = "downloader_session"
-    CHATS_DIR = "chats"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responds to the /start command."""
+    await update.message.reply_text(
+        "Hello! I'm a Chat Logger Bot. 🤖\n\n"
+        "Add me to a group, or message me directly. I will record new messages from now on. "
+        "When you are ready, type /export to download the chat log as a text file."
+    )
 
-client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Listens to all text messages and saves them."""
+    # Ignore messages that don't have text (like photos or stickers)
+    if not update.message or not update.message.text:
+        return 
 
-async def download_chat_history(chat_entity, limit=None):
-    """Downloads messages from a specific chat and saves to a text file."""
-    chat_name = getattr(chat_entity, 'title', getattr(chat_entity, 'first_name', 'Unknown'))
-    
-    # Ensure the directory exists
-    os.makedirs(CHATS_DIR, exist_ok=True)
-    filename = os.path.join(CHATS_DIR, f"{chat_name}_history.txt")
-    
-    print(f"Starting download for: {chat_name}")
+    chat_id = update.message.chat_id
+    # Get the user's name or username
+    user = update.message.from_user.username or update.message.from_user.first_name
+    text = update.message.text
+
+    # If this is a new chat, create a blank list for it
+    if chat_id not in chat_logs:
+        chat_logs[chat_id] = []
+
+    # Add the message to the list
+    chat_logs[chat_id].append(f"{user}: {text}\n")
+
+async def export_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responds to /export by sending the text file."""
+    chat_id = update.message.chat_id
+
+    if chat_id not in chat_logs or len(chat_logs[chat_id]) == 0:
+        await update.message.reply_text("I don't have any messages logged for this chat yet.")
+        return
+
+    # 1. Create a temporary text file
+    filename = f"chat_log_{chat_id}.txt"
+    with open(filename, "w", encoding="utf-8") as file:
+        file.writelines(chat_logs[chat_id])
+
+    # 2. Send the file back to the Telegram chat
+    with open(filename, "rb") as file:
+        await update.message.reply_document(document=file, filename="chat_log.txt")
+
+    # 3. Clean up: Delete the file from the server and clear memory
+    os.remove(filename)
+    chat_logs[chat_id] = []
+    await update.message.reply_text("Log exported successfully! My memory for this chat has been cleared.")
+
+def main():
+    # Fix for Python 3.14+ asyncio changes
     try:
-        with open(filename, "w", encoding="utf-8") as f:
-            async for message in client.iter_messages(chat_entity, limit=limit):
-                sender = await message.get_sender()
-                name = getattr(sender, 'first_name', 'System')
-                text = message.text or "[Media/No Text]"
-                f.write(f"[{message.date}] {name}: {text}\n")
-        print(f"Finished downloading {chat_name}")
-    except Exception as e:
-        print(f"Error saving {chat_name}: {e}")
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-@client.on(events.NewMessage(pattern='/download_all'))
-async def handler(event):
-    """Command to trigger a backup of all chats."""
-    await event.respond("Starting full backup of all chats...")
-    
-    async for dialog in client.iter_dialogs():
-        try:
-            # Limits to 500 messages per chat to avoid being banned
-            await download_chat_history(dialog.entity, limit=500)
-            await asyncio.sleep(1) # Small delay to be safe
-        except Exception as e:
-            print(f"Could not download {dialog.name}: {e}")
-            
-    await event.respond("Backup complete! Files are stored on the server.")
+    # Fetch environment variables provided by Render
+    TOKEN = os.environ.get("BOT_TOKEN")
+    # Render automatically provides this URL so your bot knows where it lives!
+    APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME") 
+    PORT = int(os.environ.get("PORT", "10000"))
 
-async def main():
-    await client.start()
-    print("Bot is running...")
-    await client.run_until_disconnected()
+    if not TOKEN:
+        print("ERROR: Please set the BOT_TOKEN environment variable.")
+        return
+
+    # Build the bot application
+    app = Application.builder().token(TOKEN).build()
+
+    # Tell the bot what to do with specific commands/messages
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("export", export_chat))
+    # Log all text messages that are NOT commands
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_message))
+
+    # Deployment logic: Use Webhooks for Render, Polling for local testing
+    if APP_NAME:
+        webhook_url = f"https://{APP_NAME}/"
+        print(f"Starting bot using Webhook on: {webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url
+        )
+    else:
+        print("Starting bot locally using Polling...")
+        app.run_polling()
 
 if __name__ == "__main__":
-    # Ensure the loop runs correctly in all environments
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+    main()
