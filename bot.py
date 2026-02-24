@@ -1,4 +1,5 @@
 import os
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -55,6 +56,13 @@ async def export_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Log exported successfully! My memory for this chat has been cleared.")
 
 def main():
+    # Fix for Python 3.14+ asyncio changes
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     # Fetch environment variables provided by Render
     TOKEN = os.environ.get("BOT_TOKEN")
     # Render automatically provides this URL so your bot knows where it lives!
